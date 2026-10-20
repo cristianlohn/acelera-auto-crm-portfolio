@@ -1,0 +1,143 @@
+// Public portfolio extract / Extração pública para portfólio.
+// Synthetic data; application code remains private. / Dados sintéticos; aplicação privada.
+/**
+ * @file auth.spec.ts
+ * @description Suíte de Testes E2E de Autenticação e Prevenção de Overflow no Card de Demonstração (Playwright).
+ *
+ * Cenários Testados:
+ * - [E2E-AUTH-01]: O botão demo deve caber perfeitamente dentro do container pai sem overflow horizontal.
+ * - [E2E-AUTH-02]: Clique no botão demo redireciona para o funil de leads (/leads) com cookie demo ativo.
+ * - [E2E-AUTH-03]: Isolamento Estrito: Login com credenciais reais elimina cookies de demonstração.
+ */
+
+import { test, expect } from "@playwright/test";
+
+test.describe("Autenticação e Layout da Página de Login", () => {
+  test("o botão demo deve caber perfeitamente dentro do container sem overflow", async ({
+    page,
+  }) => {
+    await page.goto("/login");
+
+    const container = page.locator('[data-testid="demo-card"]');
+    const button = page.locator('[data-testid="demo-login-button"]');
+
+    await expect(container).toBeVisible();
+    await expect(button).toBeVisible();
+
+    const containerBox = await container.boundingBox();
+    const buttonBox = await button.boundingBox();
+
+    expect(containerBox).not.toBeNull();
+    expect(buttonBox).not.toBeNull();
+
+    // A largura do botão deve caber com folga ou ser menor/igual à largura do card pai
+    expect(buttonBox!.width).toBeLessThanOrEqual(containerBox!.width);
+    // As coordenadas horizontais do botão devem estar contidas no container
+    expect(buttonBox!.x).toBeGreaterThanOrEqual(containerBox!.x);
+    expect(buttonBox!.x + buttonBox!.width).toBeLessThanOrEqual(
+      containerBox!.x + containerBox!.width + 1 // tolerância de subpixel
+    );
+  });
+
+  test("deve acessar o modo demonstração ao clicar no botão demo", async ({
+    page,
+  }) => {
+    await page.goto("/login");
+
+    const button = page.locator('[data-testid="demo-login-button"]');
+    await expect(button).toBeVisible();
+    await button.click();
+
+    // Aguarda navegação para o dashboard
+    await page.waitForURL("**/leads");
+    await expect(page).toHaveURL(/.*leads/);
+
+    // Cookie de demonstração deve estar ativo
+    const cookies = await page.context().cookies();
+    const demoCookie = cookies.find((c) => c.name === "acelera_demo_mode");
+    expect(demoCookie?.value).toBe("true");
+  });
+
+  test("isolamento estrito: login com credenciais reais elimina cookies de modo demonstração", async ({
+    page,
+  }) => {
+    // 1. Simula estado inicial com cookie de demo pré-existente
+    await page.context().addCookies([
+      {
+        name: "acelera_demo_mode",
+        value: "true",
+        domain: new URL(process.env.E2E_BASE_URL || "http://127.0.0.1:3000").hostname,
+        path: "/",
+      },
+    ]);
+
+    await page.goto("/login");
+
+    // 2. Preenche credenciais reais no formulário
+    test.skip(!process.env.E2E_USER_EMAIL || !process.env.E2E_USER_PASSWORD, "Dedicated test credentials are required / Credenciais de teste necessárias");
+    await page.fill("#login-email", process.env.E2E_USER_EMAIL!);
+    await page.fill("#login-password", process.env.E2E_USER_PASSWORD!);
+    await page.click("#btn-submit-login");
+
+    // 3. Aguarda navegação para o CRM
+    await page.waitForURL("**/leads");
+    await expect(page).toHaveURL(/.*leads/);
+
+    // 4. Garante que o cookie de demonstração foi completamente removido
+    const cookies = await page.context().cookies();
+    const demoCookie = cookies.find((c) => c.name === "acelera_demo_mode");
+    expect(demoCookie?.value || "").not.toBe("true");
+  });
+
+  test("logout: clique no botão Sair desloga a sessão e redireciona para /login", async ({
+    page,
+  }) => {
+    // 1. Entra no CRM via demo
+    await page.goto("/login");
+    await page.click('[data-testid="demo-login-button"]');
+    await page.waitForURL("**/dashboard/leads", { timeout: 15000 });
+    await expect(
+      page.getByRole("heading", { level: 1, name: /funil de vendas/i })
+    ).toBeVisible({ timeout: 15000 });
+    await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+
+    // Fecha o tour guiado se estiver visível para desobstruir a interface
+    const closeTour = page.getByRole("button", { name: /fechar tour/i });
+    if (await closeTour.isVisible({ timeout: 3000 }).catch(() => false)) {
+      await closeTour.click();
+      await expect(page.getByRole("dialog", { name: /tour guiado/i })).toBeHidden({ timeout: 5000 });
+    }
+
+    // 2. Clica no botão de Logout na sidebar (ou no sheet do mobile)
+    const isMobile = await page.evaluate(() => window.innerWidth < 1024);
+    if (isMobile) {
+      const menuBtn = page.locator('button[aria-label="Abrir menu"], [data-testid="mobile-menu-trigger"]').first();
+      const mobileLogoutBtn = page.locator("#btn-logout-mobile");
+
+      await expect(async () => {
+        if (await closeTour.isVisible().catch(() => false)) {
+          await closeTour.click();
+          await expect(page.getByRole("dialog", { name: /tour guiado/i })).toBeHidden({ timeout: 2000 });
+        }
+        if (!(await mobileLogoutBtn.isVisible().catch(() => false))) {
+          await menuBtn.click();
+        }
+        await expect(mobileLogoutBtn).toBeVisible({ timeout: 2000 });
+      }).toPass({ timeout: 15000 });
+
+      await mobileLogoutBtn.click();
+    } else {
+      const logoutBtn = page.locator("#btn-logout-sidebar");
+      await expect(logoutBtn).toBeVisible({ timeout: 10000 });
+      await logoutBtn.click();
+    }
+
+    // 3. Aguarda redirecionamento para a tela de login via asserção web-first
+    await expect(page).toHaveURL(/.*\/login/, { timeout: 15000 });
+
+    // 4. Valida limpeza de cookies de demo
+    const cookies = await page.context().cookies();
+    const demoCookie = cookies.find((c) => c.name === "acelera_demo_mode");
+    expect(demoCookie?.value || "").not.toBe("true");
+  });
+});
